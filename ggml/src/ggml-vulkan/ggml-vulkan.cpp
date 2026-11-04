@@ -1678,6 +1678,10 @@ static bool ggml_vk_fa_scalar_uses_mmq(const vk_device& device, ggml_type k_type
 #endif
 }
 
+static uint32_t ggml_vk_mm_wg_key(ggml_type type, uint32_t bn, uint32_t ak) {
+    return ((uint32_t)type << 16) | (bn << 4) | (ak / 1024);
+}
+
 void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
     VK_LOG_DEBUG("ggml_vk_load_shaders(" << device->name << ")");
 
@@ -2273,6 +2277,14 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
     std::vector<vk_tile_config> tc_mmq = {{s_warptile_mmq, s_mmq_wg_denoms, s_align}, {m_warptile_mmq, m_mmq_wg_denoms, m_align}, {l_warptile_mmq, l_mmq_wg_denoms, l_align}};
 
 #if defined(VK_NV_cooperative_matrix2) && defined(GGML_VULKAN_COOPMAT2_GLSLC_SUPPORT)
+    if (device->mm_wg) {
+        for (const auto type : non_lut_quant_types) {
+            ggml_vk_create_pipeline(device, device->pipeline_matmul_wg[ggml_vk_mm_wg_key(type, 256, 1024)], "matmul_wg_quant_f16",
+                                    matmul_wg_quant_f16_f16acc_cm2_len, matmul_wg_quant_f16_f16acc_cm2_data, "main", 3, sizeof(vk_mat_mat_push_constants),
+                                    {128, 256, 1}, {512, 128, 256, 32, 0, 1, 16, (uint32_t)type, (uint32_t)ggml_type_size(type)}, 1, false, true, 16);
+        }
+    }
+
     if (device->coopmat2) {
         auto const &ggml_vk_mul_mm_cm2_spec = [&](std::vector<uint32_t> spec, bool aligned, uint32_t type = UINT32_MAX) {
             spec.push_back(aligned ? 1u : 0u);        // ALIGNED
@@ -4101,7 +4113,7 @@ vk_device ggml_vk_get_device(size_t idx) {
 #endif
 #if defined(GGML_VULKAN_COOPMAT2_GLSLC_SUPPORT)
             } else if (strcmp("VK_NV_cooperative_matrix2", properties.extensionName) == 0 &&
-                       !getenv("GGML_VK_DISABLE_COOPMAT2")) {
+                       (!getenv("GGML_VK_DISABLE_COOPMAT2") || getenv("GGML_VK_MM_WG"))) {
                 coopmat2_support = true;
 #endif
             } else if (strcmp(VK_NV_COOPERATIVE_MATRIX_DECODE_VECTOR_EXTENSION_NAME, properties.extensionName) == 0 &&
@@ -4665,7 +4677,9 @@ vk_device ggml_vk_get_device(size_t idx) {
                 if (found_fp16_128 && found_fp16_256 &&
                     found_fp32_128 && found_fp32_256 &&
                     coopmat2_props.cooperativeMatrixFlexibleDimensionsMaxDimension >= 512) {
-                    device->coopmat2 = true;
+                    // GGML_VK_MM_WG keeps the extension for the wg kernel even when GGML_VK_DISABLE_COOPMAT2 turns off the cm2 pipelines.
+                    device->coopmat2 = !getenv("GGML_VK_DISABLE_COOPMAT2");
+                    device->mm_wg = getenv("GGML_VK_MM_WG") && device->vendor_id == VK_VENDOR_ID_INTEL;
                     device->coopmat2_bf16_support = found_bf16_128 && found_bf16_256;
                     device->coopmat2_decode_vector = coopmat2_decode_vector_support && coopmat2_decode_vector_features.cooperativeMatrixDecodeVector;
                 }
@@ -6487,6 +6501,18 @@ static void ggml_vk_mul_mat_q_f16(ggml_backend_vk_context * ctx, vk_context& sub
         pipeline = ggml_vk_get_64b_indexing_pipeline(ctx, pipeline);
     }
 
+    // The workgroup kernel has no bounds checks: it takes whole 128x256 tiles and whole K blocks, with B converted to f16.
+    bool mm_wg = false;
+    if (ctx->device->mm_wg && ggml_is_quantized(src0->type) && !qx_needs_dequant && y_kernel_type == GGML_TYPE_F16 &&
+        src1->type == GGML_TYPE_F32 && ne01 % 128 == 0 && ne10 % 32 == 0 && ne11 % 256 == 0 &&
+        ggml_nbytes(src0) <= ctx->device->properties.limits.maxStorageBufferRange) {
+        const auto wg = ctx->device->pipeline_matmul_wg.find(ggml_vk_mm_wg_key(src0->type, 256, 1024));
+        if (wg != ctx->device->pipeline_matmul_wg.end()) {
+            pipeline = wg->second;
+            mm_wg = true;
+        }
+    }
+
     // Reserve extra storage in the N dimension for the Y matrix, so we can avoid bounds-checking
     uint32_t padded_n = qy_needs_dequant ? ROUNDUP_POW2(ne11, pipeline->wg_denoms[1]) : ne11;
     const uint64_t x_ne = ggml_nelements(src0);
@@ -6494,7 +6520,7 @@ static void ggml_vk_mul_mat_q_f16(ggml_backend_vk_context * ctx, vk_context& sub
     const uint64_t y_ne = padded_n * ne10 * ne12 * ne13;
     const uint64_t d_ne = ggml_nelements(dst);
 
-    const uint32_t split_k = ggml_vk_guess_split_k(ctx, ne01, ne11, ne10, disable_split_k, pipeline);
+    const uint32_t split_k = ggml_vk_guess_split_k(ctx, ne01, ne11, ne10, disable_split_k || mm_wg, pipeline);
 
     const uint64_t qx_sz = ggml_type_size(src0->type) * x_ne / ggml_blck_size(src0->type);
     const uint64_t qy_sz = ggml_type_size(src1->type) * y_ne / ggml_blck_size(src1->type);
