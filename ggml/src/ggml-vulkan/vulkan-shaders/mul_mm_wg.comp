@@ -1,6 +1,8 @@
 #version 450
 
+#ifndef GGML_VK_MM_WG_DV
 #undef GGML_VULKAN_COOPMAT2_DECODE_VECTOR
+#endif
 
 #extension GL_EXT_control_flow_attributes : enable
 #extension GL_EXT_shader_16bit_storage : require

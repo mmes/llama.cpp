@@ -679,6 +679,7 @@ void matmul_shaders(bool fp16, MatMulIdType matmul_id_type, bool coopmat, bool c
 
         if (coopmat2 && f16acc && matmul_id_type == MatMulIdType::NONE) {
             string_to_spv("matmul_wg_quant_f16", "mul_mm_wg.comp", merge_maps(merge_maps(base_dict, quant_float_type_dict), {{"MULMAT_QUANT", "1"}, {"LOAD_VEC_B", load_vec}, {"B_TYPE", aligned_b_type_f16}, {"B_TYPE_SCALAR", "float16_t"}, {"B_TYPEV4", "f16vec4"}, {"D_TYPE", "float"}}), fp16, coopmat, coopmat2, f16acc);
+            string_to_spv("matmul_wg_dv_quant_f16", "mul_mm_wg.comp", merge_maps(merge_maps(base_dict, quant_float_type_dict), {{"MULMAT_QUANT", "1"}, {"LOAD_VEC_B", load_vec}, {"B_TYPE", aligned_b_type_f16}, {"B_TYPE_SCALAR", "float16_t"}, {"B_TYPEV4", "f16vec4"}, {"D_TYPE", "float"}, {"GGML_VK_MM_WG_DV", "1"}}), fp16, coopmat, coopmat2, f16acc);
         }
     }
 }
