@@ -126,6 +126,38 @@ layout(buffer_reference, std430, buffer_reference_align = 1) buffer decodeBufA {
     uint8_t raw[MmABlockBytes];
 };
 
+// q4_K vector decode: main sets these per K block, so the header load is per row and super-block and the sub-block
+// is a constant. The scalar decode keeps ggml's unpack: it runs in the driver's patch branch, which must not read them.
+#ifdef GGML_VULKAN_COOPMAT2_DECODE_VECTOR
+layout (constant_id = 9) const bool MmSuperBlockScales = true;
+layout (binding = 0) restrict readonly buffer A_U4 {uvec4 data_a_u4[];};
+uint mm_sb_hdr;
+uint mm_sb_row;
+uint mm_sb_is;
+
+bool mm_sb_scales() {
+    return MmSuperBlockScales && MmTypeA == GGML_TYPE_Q4_K;
+}
+
+f16vec4 mmDecodeQ4_K_v(const in decodeBufQ4_K bl, const in uint blockCoords[2], const in uint coordInBlock[2]) {
+    decodeBufQ4_K_packed32 bl32 = decodeBufQ4_K_packed32(bl);
+    const uint idx = coordInBlock[1];
+
+    const uvec4 v = data_a_u4[mm_sb_hdr + blockCoords[0] * mm_sb_row];
+    const vec2 dm = vec2(unpackFloat2x16(v.x));
+    const uint j = 8u * (mm_sb_is & 3u);
+    const bool lo = mm_sb_is < 4u;
+    const uint sc = lo ? (v.y >> j) & 0x3Fu : ((v.w >> j) & 0x0Fu) | ((v.y >> (j + 2u)) & 0x30u);
+    const uint mb = lo ? (v.z >> j) & 0x3Fu : ((v.w >> (j + 4u)) & 0x0Fu) | ((v.z >> (j + 2u)) & 0x30u);
+    const float d = dm.x * float(sc);
+    const float m = dm.y * float(mb);
+
+    const uint w = uint32_t(bl32.block.qs[(idx >> 6) * 8u + ((idx & 0x1Eu) >> 2)]);
+    const u8vec4 q = unpack8((w >> ((idx & 0x20u) >> 3u)) & 0x0F0F0F0Fu);
+    return f16vec4(vec4(d) * vec4(q) - vec4(m));
+}
+#endif
+
 float16_t mmDecodeA(const in decodeBufA bl_in, const in uint blockCoords[2], const in uint coordInBlock[2]) {
     switch (MmTypeA) {
     case GGML_TYPE_Q1_0:  return dequantFuncQ1_0 (decodeBufQ1_0 (bl_in), blockCoords, coordInBlock);
@@ -158,7 +190,8 @@ f16vec4 mmDecodeA_v(const in decodeBufA bl_in, const in uint blockCoords[2], con
     case GGML_TYPE_Q8_0:  return dequantFuncQ8_0_v (decodeBufQ8_0 (bl_in), blockCoords, coordInBlock);
     case GGML_TYPE_Q2_K:  return dequantFuncQ2_K_v (decodeBufQ2_K (bl_in), blockCoords, coordInBlock);
     case GGML_TYPE_Q3_K:  return dequantFuncQ3_K_v (decodeBufQ3_K (bl_in), blockCoords, coordInBlock);
-    case GGML_TYPE_Q4_K:  return dequantFuncQ4_K_v (decodeBufQ4_K (bl_in), blockCoords, coordInBlock);
+    case GGML_TYPE_Q4_K:  return mm_sb_scales() ? mmDecodeQ4_K_v(decodeBufQ4_K(bl_in), blockCoords, coordInBlock)
+                                                  : dequantFuncQ4_K_v(decodeBufQ4_K(bl_in), blockCoords, coordInBlock);
     case GGML_TYPE_Q5_K:  return dequantFuncQ5_K_v (decodeBufQ5_K (bl_in), blockCoords, coordInBlock);
     case GGML_TYPE_Q6_K:  return dequantFuncQ6_K_v (decodeBufQ6_K (bl_in), blockCoords, coordInBlock);
     case GGML_TYPE_TQ1_0: return dequantFuncTQ1_0_v(decodeBufTQ1_0(bl_in), blockCoords, coordInBlock);
@@ -372,14 +405,34 @@ void main() {
 
     coopmat<ACC_TYPE, gl_ScopeWorkgroup, BM, BN, gl_MatrixUseAccumulator> sum = coopmat<ACC_TYPE, gl_ScopeWorkgroup, BM, BN, gl_MatrixUseAccumulator>(0.f);
 
+#define MM_K_BLOCK(block_k)                                                                                              \
+    {                                                                                                                   \
+        coopmat<MAT_TYPE, gl_ScopeWorkgroup, BM, BK, gl_MatrixUseA> mat_a;                                              \
+        coopmat<MAT_TYPE, gl_ScopeWorkgroup, BK, BN, gl_MatrixUseB> mat_b;                                              \
+        coopMatLoadTensorNV(mat_a, data_a, pos_a, sliceTensorLayoutNV(tensorLayoutA, ir * BM, BM, block_k, BK) DECODEFUNCA); \
+        coopMatLoad(mat_b, data_b_scalar, pos_b + (block_k), p.stride_b, gl_CooperativeMatrixLayoutColumnMajor);        \
+        sum = coopMatMulAdd(mat_a, mat_b, sum);                                                                         \
+    }
+
+#if defined(MULMAT_QUANT) && defined(GGML_VULKAN_COOPMAT2_DECODE_VECTOR)
+    if (mm_sb_scales()) {
+        // One super-block of 256 per iteration, its 8 K blocks of BK = 32 written out so each has a constant sub-block.
+        mm_sb_row = (p.stride_a / qk) * (MmABlockBytes / 16);
+        for (uint sb_k = start_k; sb_k < end_k; sb_k += 256) {
+            mm_sb_hdr = pos_a / 16 + (sb_k / 256) * (MmABlockBytes / 16);
+            mm_sb_is = 0; MM_K_BLOCK(sb_k)
+            mm_sb_is = 1; MM_K_BLOCK(sb_k + 32)
+            mm_sb_is = 2; MM_K_BLOCK(sb_k + 64)
+            mm_sb_is = 3; MM_K_BLOCK(sb_k + 96)
+            mm_sb_is = 4; MM_K_BLOCK(sb_k + 128)
+            mm_sb_is = 5; MM_K_BLOCK(sb_k + 160)
+            mm_sb_is = 6; MM_K_BLOCK(sb_k + 192)
+            mm_sb_is = 7; MM_K_BLOCK(sb_k + 224)
+        }
+    } else
+#endif
     for (uint block_k = start_k; block_k < end_k; block_k += BK) {
-        coopmat<MAT_TYPE, gl_ScopeWorkgroup, BM, BK, gl_MatrixUseA> mat_a;
-        coopmat<MAT_TYPE, gl_ScopeWorkgroup, BK, BN, gl_MatrixUseB> mat_b;
-
-        coopMatLoadTensorNV(mat_a, data_a, pos_a, sliceTensorLayoutNV(tensorLayoutA, ir * BM, BM, block_k, BK) DECODEFUNCA);
-        coopMatLoad(mat_b, data_b_scalar, pos_b + block_k, p.stride_b, gl_CooperativeMatrixLayoutColumnMajor);
-
-        sum = coopMatMulAdd(mat_a, mat_b, sum);
+        MM_K_BLOCK(block_k)
     }
 
 #if defined(ACC_TYPE_MAX)

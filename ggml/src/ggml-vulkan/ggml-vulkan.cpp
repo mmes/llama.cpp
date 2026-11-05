@@ -2280,11 +2280,13 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
     if (device->mm_wg) {
         // GGML_VK_MM_WG_DV: the DecodeVectorFunc variant, if the device takes it.
         const bool dv = getenv("GGML_VK_MM_WG_DV") && device->coopmat2_decode_vector;
+        // GGML_VK_MM_WG_PER_CALL_SCALES: q4_K unpacks its scales in every decode call, as before.
+        const uint32_t sb_scales = getenv("GGML_VK_MM_WG_PER_CALL_SCALES") ? 0 : 1;
         for (const auto type : non_lut_quant_types) {
             ggml_vk_create_pipeline(device, device->pipeline_matmul_wg[ggml_vk_mm_wg_key(type, 256, 1024)], dv ? "matmul_wg_dv_quant_f16" : "matmul_wg_quant_f16",
                                     dv ? matmul_wg_dv_quant_f16_f16acc_cm2_len : matmul_wg_quant_f16_f16acc_cm2_len,
                                     dv ? matmul_wg_dv_quant_f16_f16acc_cm2_data : matmul_wg_quant_f16_f16acc_cm2_data, "main", 3, sizeof(vk_mat_mat_push_constants),
-                                    {128, 256, 1}, {512, 128, 256, 32, 0, 1, 16, (uint32_t)type, (uint32_t)ggml_type_size(type)}, 1, false, true, 16);
+                                    {128, 256, 1}, {512, 128, 256, 32, 0, 1, 16, (uint32_t)type, (uint32_t)ggml_type_size(type), sb_scales}, 1, false, true, 16);
         }
     }
 
