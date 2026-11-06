@@ -2279,7 +2279,7 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
 #if defined(VK_NV_cooperative_matrix2) && defined(GGML_VULKAN_COOPMAT2_GLSLC_SUPPORT)
     if (device->mm_wg) {
         // GGML_VK_MM_WG_DV: the DecodeVectorFunc variant, if the device takes it.
-        const bool dv = getenv("GGML_VK_MM_WG_DV") && device->coopmat2_decode_vector;
+        const bool dv = getenv("GGML_VK_MM_WG_DV") && device->mm_wg_decode_vector;
         for (const auto type : non_lut_quant_types) {
             ggml_vk_create_pipeline(device, device->pipeline_matmul_wg[ggml_vk_mm_wg_key(type, 256, 1024)], dv ? "matmul_wg_dv_quant_f16" : "matmul_wg_quant_f16",
                                     dv ? matmul_wg_dv_quant_f16_f16acc_cm2_len : matmul_wg_quant_f16_f16acc_cm2_len,
@@ -4684,7 +4684,10 @@ vk_device ggml_vk_get_device(size_t idx) {
                     device->coopmat2 = !getenv("GGML_VK_DISABLE_COOPMAT2");
                     device->mm_wg = getenv("GGML_VK_MM_WG") && device->vendor_id == VK_VENDOR_ID_INTEL;
                     device->coopmat2_bf16_support = found_bf16_128 && found_bf16_256;
-                    device->coopmat2_decode_vector = coopmat2_decode_vector_support && coopmat2_decode_vector_features.cooperativeMatrixDecodeVector;
+                    // Only the cm2 pipelines may take the decode-vector paths; the wg kernel has its own flag.
+                    const bool decode_vector = coopmat2_decode_vector_support && coopmat2_decode_vector_features.cooperativeMatrixDecodeVector;
+                    device->coopmat2_decode_vector = device->coopmat2 && decode_vector;
+                    device->mm_wg_decode_vector = device->mm_wg && decode_vector;
                 }
             }
 #endif

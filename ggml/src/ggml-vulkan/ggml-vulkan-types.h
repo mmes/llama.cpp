@@ -787,6 +787,7 @@ struct vk_device_struct {
     std::map<vk_matmul_pipeline_key, std::vector<vk_matmul_pipeline_pair>> pipeline_matmul;
     // Workgroup-scope quant matmul (GGML_VK_MM_WG), keyed by ggml_vk_mm_wg_key().
     bool mm_wg {};
+    bool mm_wg_decode_vector {};
     std::map<uint32_t, vk_pipeline> pipeline_matmul_wg;
     matmul_tile_selector_t matmul_tile_selector;
     matmul_tile_selector_t matmul_id_tile_selector;
