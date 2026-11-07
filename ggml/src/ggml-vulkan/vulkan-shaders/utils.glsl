@@ -25,7 +25,11 @@ uint fastdiv_L(uint packed, uint slot) {
 }
 
 uint fastdiv_small(uint a, uint b) {
-    return (a < b) ? 0 : (a / b);
+    // a branch, so the division is skipped when every invocation has a < b
+    [[dont_flatten]] if (a < b) {
+        return 0;
+    }
+    return a / b;
 }
 
 void get_indices(uint idx, out uint i00, out uint i01, out uint i02, out uint i03, uint ne00, uint ne01, uint ne02, uint ne03) {
