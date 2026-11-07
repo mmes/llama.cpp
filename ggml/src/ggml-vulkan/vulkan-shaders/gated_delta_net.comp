@@ -118,11 +118,13 @@ void main() {
 
     uint attn_off = (seq_id * n_tokens * H + head_id) * S_V;
 
-    for (uint t = 0; t < n_tokens; t++) {
-        const uint q_off = iq3 * sq3 + t * sq2 + iq1 * sq1;
+    // Per-token offsets advance by their token stride instead of being recomputed.
+    uint q_off = iq3 * sq3 + iq1 * sq1;
+    uint v_off = seq_id * sv3 + head_id * sv1;
+    uint gb_off = seq_id * sb3 + head_id * sb1;
+
+    for (uint t = 0; t < n_tokens; t++, q_off += sq2, v_off += sv2, gb_off += sb2) {
         const uint k_off = q_off;
-        const uint v_off = seq_id * sv3 + t * sv2 + head_id * sv1;
-        const uint gb_off = seq_id * sb3 + t * sb2 + head_id * sb1;
         const FLOAT_TYPE beta_val = FLOAT_TYPE(data_beta[gb_off]);
 
         FLOAT_TYPE k_reg[ROWS_PER_LANE];
