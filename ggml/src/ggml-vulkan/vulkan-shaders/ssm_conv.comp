@@ -8,6 +8,7 @@ layout(constant_id = 0) const uint BLOCK_SIZE = 32;
 layout(constant_id = 1) const uint TOKENS_PER_WG = 16;
 layout(constant_id = 2) const bool APPLY_BIAS = false;
 layout(constant_id = 3) const bool APPLY_SILU = false;
+layout(constant_id = 4) const uint TOKENS_PER_THREAD = 1;
 
 layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z = 1) in;
 
@@ -23,38 +24,65 @@ layout(push_constant) uniform PushConstants {
     uint nc; uint ncs; uint nr; uint n_t; uint n_s;
 };
 
-void main() {
-    const uint i1 = gl_GlobalInvocationID.x;
-    const uint i2 = gl_WorkGroupID.y * TOKENS_PER_WG + gl_LocalInvocationID.y;
-    const uint i3 = gl_WorkGroupID.z;
-
-    if (i1 >= nr || i2 >= n_t || i3 >= n_s) {
-        return;
-    }
-
-    const uint src0_base = i3 * (nb02 / 4) + i2 + i1 * (nb01 / 4);
-    const uint src1_base = i1 * (nb11 / 4);
-
-    float sum = 0.0;
-
-    if (nc == 4) {
-        sum = dot(
-            vec4(src0[src0_base], src0[src0_base + 1], src0[src0_base + 2], src0[src0_base + 3]),
-            vec4(src1[src1_base], src1[src1_base + 1], src1[src1_base + 2], src1[src1_base + 3])
-        );
-    } else {
-        [[unroll]] for (uint i0 = 0; i0 < nc; i0++) {
-            sum += src0[src0_base + i0] * src1[src1_base + i0];
-        }
-    }
-
+float finish(float sum, uint i1) {
     if (APPLY_BIAS) {
         sum += bias[i1];
     }
     if (APPLY_SILU) {
         sum = sum / (1.0f + exp(-sum));
     }
+    return sum;
+}
 
-    const uint dst_idx = i3 * (dst_nb2 / 4) + i2 * (dst_nb1 / 4) + i1;
-    dst[dst_idx] = sum;
+void main() {
+    const uint i1 = gl_GlobalInvocationID.x;
+    const uint i2_0 = (gl_WorkGroupID.y * TOKENS_PER_WG + gl_LocalInvocationID.y) * TOKENS_PER_THREAD;
+    const uint i3 = gl_WorkGroupID.z;
+
+    if (i1 >= nr || i2_0 >= n_t || i3 >= n_s) {
+        return;
+    }
+
+    const uint src0_row = i3 * (nb02 / 4) + i1 * (nb01 / 4);
+    const uint src1_base = i1 * (nb11 / 4);
+
+    // Several consecutive tokens per invocation share the window loads.
+    if (TOKENS_PER_THREAD > 1 && nc == 4) {
+        const vec4 w = vec4(src1[src1_base], src1[src1_base + 1], src1[src1_base + 2], src1[src1_base + 3]);
+        float x[TOKENS_PER_THREAD + 3];
+        [[unroll]] for (uint j = 0; j < TOKENS_PER_THREAD + 3; j++) {
+            x[j] = src0[src0_row + min(i2_0 + j, ncs - 1)];
+        }
+        [[unroll]] for (uint j = 0; j < TOKENS_PER_THREAD; j++) {
+            const uint i2 = i2_0 + j;
+            if (i2 < n_t) {
+                const float sum = dot(vec4(x[j], x[j + 1], x[j + 2], x[j + 3]), w);
+                dst[i3 * (dst_nb2 / 4) + i2 * (dst_nb1 / 4) + i1] = finish(sum, i1);
+            }
+        }
+        return;
+    }
+
+    [[unroll]] for (uint j = 0; j < TOKENS_PER_THREAD; j++) {
+        const uint i2 = i2_0 + j;
+        if (i2 >= n_t) {
+            break;
+        }
+        const uint src0_base = src0_row + i2;
+
+        float sum = 0.0;
+
+        if (nc == 4) {
+            sum = dot(
+                vec4(src0[src0_base], src0[src0_base + 1], src0[src0_base + 2], src0[src0_base + 3]),
+                vec4(src1[src1_base], src1[src1_base + 1], src1[src1_base + 2], src1[src1_base + 3])
+            );
+        } else {
+            [[unroll]] for (uint i0 = 0; i0 < nc; i0++) {
+                sum += src0[src0_base + i0] * src1[src1_base + i0];
+            }
+        }
+
+        dst[i3 * (dst_nb2 / 4) + i2 * (dst_nb1 / 4) + i1] = finish(sum, i1);
+    }
 }
