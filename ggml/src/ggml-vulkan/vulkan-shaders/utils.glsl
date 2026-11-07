@@ -1,9 +1,12 @@
 #ifndef UTILS_COMP
 #define UTILS_COMP
 
+#extension GL_EXT_control_flow_attributes : enable
+
 // mod and div are expensive and coordinates/dimensions are often power of 2 or equal to 1
+// b is uniform: keep the branch, or a compiler that flattens it computes a % b for every call
 uint fastmod(uint a, uint b) {
-    if ((b & (b-1)) == 0) {
+    [[dont_flatten]] if ((b & (b-1)) == 0) {
         return a & (b-1);
     }
     return a % b;
