@@ -3726,6 +3726,18 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
                 lanes_per_column = std::min(S_V, gdn_subgroup_size);
             }
 
+            // Experiment knobs: GGML_VK_GDN_SG overrides the subgroup size, GGML_VK_GDN_LANES the lanes per column.
+            if (const char * e = getenv("GGML_VK_GDN_SG")) {
+                const uint32_t sg = (uint32_t)atoi(e);
+                if (device->subgroup_size_control && device->subgroup_min_size <= sg && sg <= device->subgroup_max_size) {
+                    gdn_subgroup_size = sg;
+                    lanes_per_column = std::min(lanes_per_column, gdn_subgroup_size);
+                }
+            }
+            if (const char * e = getenv("GGML_VK_GDN_LANES")) {
+                lanes_per_column = std::min(std::max(1u, (uint32_t)atoi(e)), std::min(S_V, gdn_subgroup_size));
+            }
+
             // gated_delta_net.comp relies on S_V % COLS_PER_WG == 0 and
             // S_V % LANES_PER_COLUMN == 0 to avoid bounds checks.
             while (lanes_per_column > 1u) {
