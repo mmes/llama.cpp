@@ -26,6 +26,9 @@ layout (push_constant) uniform parameter
 #include "types.glsl"
 
 layout(constant_id = 0) const uint BLOCK_SIZE = 32;
+// Diagnostic, not for landing: issue the max pass's loads unconditionally
+// (clamped column) so they are all in flight before the first use.
+layout(constant_id = 1) const uint HOIST_LOADS = 0;
 layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
 
 layout (binding = 0) readonly buffer X {A_TYPE data_a[];};
@@ -75,6 +78,44 @@ void soft_max(uint num_iters) {
     const uint DATA_CACHE_SIZE = 16;
     FLOAT_TYPE data_cache[DATA_CACHE_SIZE];
 
+    if (HOIST_LOADS != 0) {
+        FLOAT_TYPE b_cache[DATA_CACHE_SIZE];
+        [[unroll]] for (uint col0 = 0, idx = 0; idx < num_iters && idx < DATA_CACHE_SIZE; col0 += BLOCK_SIZE, ++idx) {
+            data_cache[idx] = FLOAT_TYPE(data_a[rowx * p.KX + min(col0 + tid, p.KX - 1)]);
+        }
+        if (p.KY > 0) {
+            [[unroll]] for (uint col0 = 0, idx = 0; idx < num_iters && idx < DATA_CACHE_SIZE; col0 += BLOCK_SIZE, ++idx) {
+                b_cache[idx] = FLOAT_TYPE(data_b[rowy_start + min(col0 + tid, p.KX - 1)]);
+            }
+        } else {
+            [[unroll]] for (uint idx = 0; idx < DATA_CACHE_SIZE; ++idx) {
+                b_cache[idx] = FLOAT_TYPE(0);
+            }
+        }
+        [[unroll]] for (uint col0 = 0, idx = 0; idx < num_iters; col0 += BLOCK_SIZE, ++idx) {
+            const uint col = col0 + tid;
+            FLOAT_TYPE v;
+            if (idx < DATA_CACHE_SIZE) {
+                v = data_cache[idx] * p.scale + slope * b_cache[idx];
+            } else {
+                FLOAT_TYPE a = FLOAT_TYPE(0);
+                if (col < p.KX) {
+                    a = data_a[rowx * p.KX + col];
+                }
+                FLOAT_TYPE b = FLOAT_TYPE(0);
+                if (p.KY > 0 && col < p.KX) {
+                    b = data_b[rowy_start + col];
+                }
+                v = a * p.scale + slope * b;
+            }
+            if (col < p.KX) {
+                max_val = max(max_val, v);
+            }
+            if (idx < DATA_CACHE_SIZE) {
+                data_cache[idx] = v;
+            }
+        }
+    } else {
     [[unroll]] for (uint col0 = 0, idx = 0; idx < num_iters; col0 += BLOCK_SIZE, ++idx) {
         const uint col = col0 + tid;
 
@@ -97,6 +138,7 @@ void soft_max(uint num_iters) {
         if (idx < DATA_CACHE_SIZE) {
             data_cache[idx] = v;
         }
+    }
     }
 
     // reduce across the workgroup
