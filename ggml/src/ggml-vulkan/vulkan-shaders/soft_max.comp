@@ -29,6 +29,9 @@ layout(constant_id = 0) const uint BLOCK_SIZE = 32;
 // Diagnostic, not for landing: issue the max pass's loads unconditionally
 // (clamped column) so they are all in flight before the first use.
 layout(constant_id = 1) const uint HOIST_LOADS = 0;
+// Diagnostic, not for landing: walk the rows head-fastest, so the workgroups
+// that share a mask row run back to back.
+layout(constant_id = 2) const uint HEAD_FASTEST = 0;
 layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
 
 layout (binding = 0) readonly buffer X {A_TYPE data_a[];};
@@ -43,7 +46,11 @@ shared FLOAT_TYPE vals[BLOCK_SIZE];
 // as if it were a template function, to allow unrolling.
 void soft_max(uint num_iters) {
     const uint tid = gl_LocalInvocationID.x;
-    const uint rowx = gl_WorkGroupID.z * 262144 + gl_WorkGroupID.y * 512 + gl_WorkGroupID.x;
+    uint rowx = gl_WorkGroupID.z * 262144 + gl_WorkGroupID.y * 512 + gl_WorkGroupID.x;
+    if (HEAD_FASTEST != 0) {
+        const uint rest = rowx / p.ne02;
+        rowx = ((rest / p.ne01) * p.ne02 + rowx % p.ne02) * p.ne01 + rest % p.ne01;
+    }
 
     const uint32_t i03 = rowx / (p.ne01 * p.ne02);
     const uint32_t i02 = (rowx - i03 * p.ne01 * p.ne02) / p.ne01;
