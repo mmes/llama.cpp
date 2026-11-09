@@ -40,11 +40,15 @@ shared FLOAT_TYPE vals[BLOCK_SIZE];
 // as if it were a template function, to allow unrolling.
 void soft_max(uint num_iters) {
     const uint tid = gl_LocalInvocationID.x;
-    const uint rowx = gl_WorkGroupID.z * 262144 + gl_WorkGroupID.y * 512 + gl_WorkGroupID.x;
+    const uint wg = gl_WorkGroupID.z * 262144 + gl_WorkGroupID.y * 512 + gl_WorkGroupID.x;
 
-    const uint32_t i03 = rowx / (p.ne01 * p.ne02);
-    const uint32_t i02 = (rowx - i03 * p.ne01 * p.ne02) / p.ne01;
-    const uint32_t i01 = rowx % p.ne01;
+    // Once a head's rows outgrow the cache, run the heads that share a mask row back to back.
+    const bool head_fastest = p.KY > 0 && p.ne12 < p.ne02 && p.ne01 * p.KX > 1280 * 1024;
+    const uint32_t i03 = wg / (p.ne01 * p.ne02);
+    const uint r = wg - i03 * p.ne01 * p.ne02;
+    const uint32_t i02 = head_fastest ? r % p.ne02 : r / p.ne01;
+    const uint32_t i01 = head_fastest ? r / p.ne02 : r % p.ne01;
+    const uint rowx = wg < p.nrows_x ? (i03 * p.ne02 + i02) * p.ne01 + i01 : wg;
 
     uint rowy_start = 0;
     if (p.KY > 0) {
